@@ -1,0 +1,27 @@
+FROM nvidia/cuda:12.3.2-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Install Python and pip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install deps
+COPY config/requirements.txt .
+RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch==2.5.1
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy project code
+COPY . .
+
+# Default: GPU worker with CUDA_VISIBLE_DEVICES set at runtime via docker-compose
+# Environment defaults (overridden by docker-compose CUDA_VISIBLE_DEVICES)
+ENV PII_EXECUTION_MODE=gpu
+ENV PII_REQUIRE_GPU=true
+ENV PII_STRICT_PRIVACY_MODE=true
+
+# Entrypoint starts the GPU worker process
+CMD ["python3", "-m", "uvicorn", "pii_pipeline.api_endpoint:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

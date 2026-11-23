@@ -1,0 +1,129 @@
+# =============================================================================
+# Indic PII & PHI Detection Pipeline Configuration (Stage 9)
+# =============================================================================
+# Edit this file to swap models, adjust confidence thresholds, change devices,
+# or tune performance parameters without modifying any Python code.
+
+# Optional source/type/script acceptance gates. Leave empty until calibrated
+# on reviewed development data. Example key: gliner2piiprimary:person:telugu.
+acceptance:
+  score_thresholds: {}
+
+models:
+  # ---------------------------------------------------------------------------
+  # 1. GLiNER Primary Model (Zero-Shot PII Recognition)
+  # ---------------------------------------------------------------------------
+  gliner_primary:
+    # Immutable local model directory. Provision it before starting the service:
+    #   python scripts/provision_models.py
+    # A local path prevents an inference service from downloading or silently
+    # changing its model at startup. See documentation/HANDOVER.md for the approved flow.
+    model_name_or_path: "models/gliner2-primary"
+    # Loader contract: legacy_span (current GLiNER2), boundary (GLiNER 2.5,
+    # requires Python 3.10+ and AutoExtractor), or auto for known 2.5 IDs.
+    adapter: "legacy_span"
+    # pii keeps the 42-label privacy contract. Use pii_phi with a boundary
+    # schema model to also query NPI, MRN, health-plan, device, license, and ICD-10 identifiers.
+    entity_schema: "pii"
+
+    # Confidence gating threshold (0.0 to 1.0).
+    # 0.95 maximises precision but drops borderline detections, and a score
+    # landing exactly on the threshold flips with CPU thread count (a real name
+    # scoring exactly 0.95 was redacted in one run and exposed in the next).
+    # 0.50 is the recall-first setting for this deployment: over-redaction is
+    # acceptable here, an exposed identifier is not. Raise it only together with
+    # a re-run of the gold-set evaluation.
+    threshold: 0.50
+
+    # Sliding window inference parameters
+    window_size: 512
+    stride: 384
+
+    # ONNX Runtime hybrid inference options
+    use_onnx: false
+    onnx_encoder_path: "onnx_models/gliner_primary/encoder.onnx"
+
+  # ---------------------------------------------------------------------------
+  # 2. GLiNER Vanilla Fallback Model (Out-of-Taxonomy Resolution)
+  # ---------------------------------------------------------------------------
+  gliner_vanilla_fallback:
+    # The current fallback uses the same approved local checkpoint.
+    model_name_or_path: "models/gliner2-primary"
+    adapter: "legacy_span"
+    confirm_threshold: 0.40
+
+  # ---------------------------------------------------------------------------
+  # 3. IndicNER Model (Multilingual Indic Script Entity Recognition)
+  # ---------------------------------------------------------------------------
+  indic_ner:
+    telugu_enrichment:
+      enabled: true
+    # Local IndicNER package root. Change this only when swapping the package.
+    use_onnx: false
+    model_path: "models/indicner"
+    # Optional Hugging Face/local weights directory used by that package.
+    # Leave null to use models/IndicNER under the package root.
+    model_weights_path: null
+    onnx_model_path: "onnx_models/indicner.onnx"
+
+    # IndicNER is fine-tuned on single sentences. Given a whole multi-turn
+    # transcript it predicts all-O and returns nothing at all — not truncation,
+    # since a 400-character row is only ~157 tokens against a 512-token limit.
+    # That silently disabled the only detector that catches Indic-script names:
+    # GLiNER finds none of them, so before chunking they were being exposed.
+    # Text is split on sentence boundaries; long sentences are cut on whitespace
+    # with an overlap so a name on a cut still appears whole in the next chunk.
+    # 120 is the recall-first setting (172 PERSON spans / 50 rows, against 5
+    # unchunked). Raise it only together with a re-run of the gold-set evaluation.
+    max_chunk_chars: 120
+    chunk_overlap_chars: 40
+    # Minimum real softmax probability for an IndicNER span. The vendored model
+    # used to hardcode 0.99 for every span, which made this impossible; it now
+    # reports the true probability. Measured against the real-transcript
+    # benchmark, gating here costs no recall — the gazetteer and the context
+    # rules carry it — while cutting detections by roughly half.
+    min_confidence: 0.95
+
+  # ---------------------------------------------------------------------------
+  # 4. spaCy NLP Backbone (Tokenization & Presidio Base Engine)
+  # ---------------------------------------------------------------------------
+  spacy:
+    model_name: "en_core_web_sm"
+    language: "en"
+
+# =============================================================================
+# Runtime & Hardware Settings
+# =============================================================================
+runtime:
+  # Compute device: "auto" (best supported CUDA/MPS/CPU), "cuda:0", "mps", or "cpu".
+  # Keep this as "auto" for portable deployments; an explicit value overrides detection.
+  device: "auto"
+
+  # CPU threads for PyTorch & CPU execution. "auto" uses the CPU allocation
+  # visible to this process (including Linux CPU affinity/cpuset limits).
+  # Use a positive integer, e.g. 16, for a fixed and reproducible benchmark.
+  # Pinned rather than "auto": thread count changes the float reduction order,
+  # which moves borderline scores across the GLiNER threshold and makes
+  # redaction non-deterministic between runs on the same input.
+  cpu_threads: 8
+
+  # Enable granular latency profiling across execution stages
+  enable_profiling: false
+
+  # If an accelerator is present but the configured models cannot execute on it,
+  # retry once on CPU instead of leaving the pipeline unavailable.
+  fallback_to_cpu: false
+
+  # The current GLiNER build can abort inside a Metal kernel on some Macs.
+  # Auto mode therefore detects Apple Silicon but uses stable CPU execution
+  # unless you explicitly enable MPS after validating it on your machine.
+  enable_mps: false
+
+# =============================================================================
+# Anonymizer & Redaction Settings
+# =============================================================================
+anonymizer:
+  # Placeholder format: "{entity_type}_{index}" e.g., <PERSON_1>, <NPI_1>
+  prefix: "<"
+  suffix: ">"
+  indexed: true

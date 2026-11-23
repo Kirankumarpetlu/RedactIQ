@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Python dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY config/requirements.txt .
+RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy project code
+COPY . .
+
+# Environment defaults for CPU worker
+ENV PII_EXECUTION_MODE=cpu
+ENV PII_REQUIRE_GPU=false
+ENV PII_STRICT_PRIVACY_MODE=true
+
+# Entrypoint starts the CPU worker process
+CMD ["python3", "-m", "uvicorn", "pii_pipeline.api_endpoint:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

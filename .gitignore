@@ -1,0 +1,90 @@
+# Python builds, caches and environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+.venv_improved/
+dist/
+wheels/
+.Python
+.venv*/
+venv*/
+env/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and archive metadata
+.idea/
+.vscode/
+.DS_Store
+__MACOSX/
+._*
+
+# Private data is restored from pinned Hugging Face storage into an ignored cache
+/data/
+/output/
+/logs/
+/.secrets/
+/benchmarks/results/
+
+# Documentation, reports and report-only tools stay local
+/docs/
+/documentation/
+*.md
+!/README.md
+*.docx
+/scripts/export_project_report_docx.py
+/scripts/render_report_diagrams.ps1
+
+# Local asset manifests and review interface
+/DATA_ASSETS.json
+/MODEL_ASSETS.json
+/gradio_app.py
+
+# Local annotations and configuration; retain examples if supplied for setup.
+/*.csv
+.env
+.env.*
+!.env.example
+!.env.sample
+# Separate development checkouts are not part of the distributable project.
+/agent_worktrees/
+*.log
+/.env.txt
+
+# Model weights and alternative runtime exports stay local
+/models/gliner2-primary/
+/models/gliner2-pii-portable/
+/onnx_models/
+/scripts/onnx_models/
+*.bin
+*.onnx
+*.gguf
+*.safetensors
+*.pt
+*.pth
+/gliner2-pii-portable.zip
+
+# Keep checkpoint metadata and alternate exports in pinned private storage
+*.safetensors.index.json
+*.bin.index.json
+*.onnx_data
+*.onnx.data
+*.ckpt
+*.h5
+*.tflite
+*.model
+**/models/indicner/models/
+**/models/gliner2-primary/
+**/onnx_models/
+**/models/gliner2-pii-portable/tokenizer.json
+**/models/gliner2-pii-portable/schema_prefix.json
+**/.cache/huggingface/

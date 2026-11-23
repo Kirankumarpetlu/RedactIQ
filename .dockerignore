@@ -1,0 +1,26 @@
+.git/
+.venv*/
+venv*/
+env/
+ENV/
+.pytest_cache/
+.cache/
+output/
+data/
+**/__pycache__/
+**/*.pyc
+**/.DS_Store
+**/__MACOSX/
+data/input/
+data/output/
+data/production/
+data/archive/
+data/benchmarked csv*/
+data/gold/
+logs/
+docs/
+documentation/
+agent_worktrees/
+benchmarks/results/
+onnx_models/
+models/gliner2-pii-portable/
