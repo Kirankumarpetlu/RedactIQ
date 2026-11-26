@@ -4,10 +4,11 @@ import httpx
 import pytest
 from presidio_analyzer import RecognizerResult
 
-from pii_pipeline.decider_stage import CRITERIA, MODEL, LocalLightningDecider, OpenRouterDecider, gap_spans
+from pii_pipeline.decider_stage import CRITERIA, MODEL, LocalLightningDecider, LocalRulesDecider, OpenRouterDecider, gap_spans
 from pii_pipeline.orchestrator import RoutedResults
 from pii_pipeline.policy.entity_policy import resolve_entities
 from pii_pipeline.recognizers.indic_identifiers import build_indic_identifier_recognizers
+from tests.helpers import fake_pipeline
 
 
 def _candidate(text, value, label, recognizer):
@@ -173,7 +174,9 @@ def test_local_lightning_requires_evidence_for_a_numeric_label(monkeypatch):
 @pytest.mark.parametrize("recognizer, text, expected", [
     ("IndicNameContextRecognizer", "రోగి పూర్తి పేరు ఏమిటి? అనయ వర్మ. జ్వరం తగ్గింది.", "అనయ వర్మ"),
     ("TeluguNameCueRecognizer", "నన్ను అనయ వర్మ అని పిలుస్తారు.", "అనయ వర్మ"),
+    ("TeluguNameCueRecognizer", "నన్ను అనయ వర్మ అంటారు. ఫాలో అప్ తరువాత.", "అనయ వర్మ"),
     ("SpokenPlaceRecognizer", "మీరు ఎక్కడ నివసిస్తున్నారు? చింతల పేట. ఫాలో అప్ తరువాత.", "చింతల పేట"),
+    ("SpokenPlaceRecognizer", "మీరు ఏ ఊర్లో ఉంటారు? చింతల పేట. ఫాలో అప్ తరువాత.", "చింతల పేట"),
     ("SpokenPlaceRecognizer", "రోగి చంద్రపేటలో నివసిస్తున్నారు.", "చంద్రపేట"),
     ("AgeRecognizer", "The infant is 7 months old. Follow-up tomorrow.", "7"),
     ("LabelledMrnRecognizer", "Patient ID: 555-011-0234. Follow-up tomorrow.", "555-011-0234"),
@@ -204,6 +207,84 @@ def test_local_rule_age_does_not_spend_a_confirmation_request():
         decider.close()
 
 
+def test_local_fallback_confirmation_does_not_change_selected_span():
+    text = "Record number ZR-123."
+    candidate = _candidate(text, "ZR-123", "MEDICAL_RECORD_NUMBER", "OtherRecognizer")
+    decider = LocalLightningDecider(8080, transport=httpx.MockTransport(lambda _: pytest.fail("fallback confirmation")))
+    try:
+        kept, counts, trace = decider.analyze(text, RoutedResults([], [candidate]))
+        selected, _ = resolve_entities(text, kept)
+        assert [e["text"] for e in selected] == ["ZR-123"]
+        assert counts["decider_calls"] == 0
+        assert trace[0]["reason"] == "confirmation_does_not_change_selection"
+    finally:
+        decider.close()
+
+
+@pytest.mark.parametrize("tag_type, tag_text, expected_calls", [
+    ("PERSON", "Mira Sample", 0),
+    ("PERSON", "Other name", 1),
+    ("ADDRESS", "Mira Sample", 1),
+])
+def test_local_verification_skips_only_validated_agreeing_tags(tag_type, tag_text, expected_calls):
+    text = "Follow-up for Mira Sample."
+    candidate = _candidate(text, "Mira Sample", "PERSON", "IndicPersonNameGazetteer")
+
+    def reply(_):
+        return httpx.Response(200, json={"model": LocalLightningDecider.model, "answers": {"span": {
+            "type": "choice", "choice": "PERSON",
+            "probabilities": {label: float(label == "PERSON") for label in CRITERIA},
+        }}})
+
+    pipe = fake_pipeline()
+    pipe.orchestrator.analyze = lambda text, **kwargs: RoutedResults([candidate], [])
+    pipe._decider = LocalLightningDecider(8080, transport=httpx.MockTransport(reply))
+    try:
+        result = pipe.run(text, semantic_tags=[{
+            "start": candidate.start, "end": candidate.end, "tag": tag_type, "text": tag_text,
+        }])
+        assert result["routing_summary"]["decider_calls"] == expected_calls
+        assert result["redacted_text"] != text
+    finally:
+        pipe._decider.close()
+
+
+def test_validated_tag_proposes_only_whole_telugu_repetitions():
+    text = "పేరు అనయ వర్మ. అనయ వర్మకు మందు ఇచ్చారు. అనయ వర్మ వచ్చింది."
+    name = "అనయ వర్మ"
+    first, last = text.index(name), text.rindex(name)
+
+    def reply(request):
+        assert json.loads(request.content)["state"].endswith("Prior: PERSON, pplx_decider_indic, ")
+        return httpx.Response(200, json={"model": LocalLightningDecider.model, "answers": {"span": {
+            "type": "choice", "choice": "PERSON", "probabilities": {"PERSON": 1, "not_pii": 0},
+        }}})
+
+    pipe = fake_pipeline()
+    pipe.orchestrator.analyze = lambda text, **kwargs: RoutedResults([], [])
+    pipe._decider = LocalLightningDecider(8080, transport=httpx.MockTransport(reply))
+    try:
+        result = pipe.run(text, semantic_tags=[{"start": first, "end": first + len(name), "tag": "PERSON"}])
+        assert result["routing_summary"]["decider_calls"] == 1
+        assert [e["start"] for e in result["entities_detected"]] == [first, last]
+    finally:
+        pipe._decider.close()
+
+
+def test_fast_local_rules_use_validated_tags_and_preserve_uncued_text():
+    text = "పేరు అనయ వర్మ. అనయ వర్మకు మందు ఇచ్చారు. అనయ వర్మ వచ్చింది. Read Sample Book."
+    name = "అనయ వర్మ"
+    first, last = text.index(name), text.rindex(name)
+    pipe = fake_pipeline()
+    pipe.orchestrator.analyze = lambda text, **kwargs: RoutedResults([], [])
+    pipe._decider = LocalRulesDecider()
+
+    result = pipe.run(text, semantic_tags=[{"start": first, "end": first + len(name), "tag": "PERSON"}])
+    assert result["routing_summary"]["decider_calls"] == 0
+    assert [e["start"] for e in result["entities_detected"]] == [first, last]
+    assert result["redacted_text"].endswith("Read Sample Book.")
+
+
 def test_labelled_medical_id_wins_over_a_phone_guess():
     text = "Patient ID: 555-011-0234. Temp 98."
     rule = next(rule for rule in build_indic_identifier_recognizers() if rule.name == "LabelledMrnRecognizer")
@@ -218,3 +299,23 @@ def test_labelled_medical_id_wins_over_a_phone_guess():
         ]
     finally:
         decider.close()
+
+
+def test_local_rules_repeat_landmark_place_before_a_telugu_case_suffix():
+    text = "అమరావతి దగ్గర ఆగాము. తరువాత అమరావతికి వెళ్ళాము. అమరావతికిలో."
+    candidate = _candidate(text, "అమరావతి", "address", "SpokenPlaceRecognizer")
+    candidate.recognition_metadata["boundary_evidence"] = "landmark_relation"
+    pipe = fake_pipeline()
+    pipe.orchestrator.analyze = lambda text, **kwargs: RoutedResults([candidate], [])
+    pipe._decider = LocalRulesDecider()
+    assert pipe.run(text)["redacted_text"] == "<ADDRESS_1> దగ్గర ఆగాము. తరువాత <ADDRESS_2>కి వెళ్ళాము. అమరావతికిలో."
+
+
+def test_local_rules_use_an_uncertain_input_name_tag_only_at_its_annotated_span():
+    text = "పేరు మర్చిపోయాను. అనయ. కాదు. అనయ వచ్చింది."
+    start = text.index("అనయ")
+    pipe = fake_pipeline()
+    pipe.orchestrator.analyze = lambda text, **kwargs: RoutedResults([], [])
+    pipe._decider = LocalRulesDecider()
+    result = pipe.run(text, semantic_tags=[{"start": start, "end": start + len("అనయ"), "tag": "PERSON"}])
+    assert [item["start"] for item in result["entities_detected"]] == [start]

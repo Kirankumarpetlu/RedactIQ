@@ -34,7 +34,7 @@ from ..policy.context_filters import (
     plausible_person_surface,
     has_historical_age_context,
 )
-from .clinical_calendar import ClinicalCalendarDateRecognizer
+from .clinical_calendar import _MONTH, ClinicalCalendarDateRecognizer
 from .hindi_age import iter_hindi_age_spans
 from ..data_assets import require_data_path
 from ..telugu_utils import TELUGU_NUMBER_PATTERN, parse_telugu_number, split_telugu_suffix
@@ -294,7 +294,7 @@ _NAME_BOUNDARIES = _CLINICAL_NON_NAMES | {
 }
 _NAME_QUESTION_WORDS = {"ఏంటి", "ఏంది", "ఏంటమ్మా", "ఏందయ్యా", "ఎట్లా", "ఎవరు", "అండి", "क्या", "कौन"}
 _NAME_NARRATIVE_WORDS = {"వస్తుంది", "చెప్తారు", "మారుద్ది", "మర్చిపోయాను",
-                         "గుర్తుపెట్టుకోలే", "చెప్పారన్నమాట", "వేపించుకోవాలని", "speaker", "so"}
+                         "గుర్తుపెట్టుకోలే", "చెప్పారన్నమాట", "వేపించుకోవాలని", "పెట్టారు", "speaker", "so"}
 _NAME_TITLES = r"(?:(?:Dr\.?|doctor|డాక్టర్|डॉक्टर|டாக்டர்|ಡಾಕ್ಟರ್)\s+)"
 _OBJECT_NAME_FRAME = re.compile(r"(?:medicine|drug|tablet|test|దాని|మందు|మాత్ర)\s+(?:name|పేరు)\s*(?:is|:)?\s*$",re.I)
 
@@ -362,6 +362,42 @@ class IndicNameContextRecognizer(KeyedGroupRecognizer):
             rf"(?:పేరేంటి|పేరేమిటి|పేరు\s*(?:ఏంటి|ఏమిటి|ఎంటి|ఏంది|ఏంటమ్మా|ఏందయ్యా))|మీ\s*పేరు|"
             rf"(?:உங்களோட\s+)?(?:பேரு|பெயர்)|आपका\s+नाम(?:\s+क्या\s+है)?)"
             rf"\s*[?.:]+\s*(?:my\s+name\s+is\s+|I\s+am\s+|నా[ \t]+పేరు[ \t]*[:=]?[ \t]+)?(?:{_NAME_TITLES})?({_NAME_CAPTURE})",re.I)
+        self.telugu_named_person = re.compile(
+            r"(?<![\u0c00-\u0c7fA-Za-z])([\u0c00-\u0c7f]+)[ \t]+"
+            r"(?:అనే[ \t]+పేరు|(?:అనే|అని)[ \t]+(?:ఒక[ \t]+)?(?:రోగి|పేషెంట్|అబ్బాయి|అమ్మాయి))"
+            r"(?![\u0c00-\u0c7fA-Za-z])"
+        )
+        self.telugu_greeted_person = re.compile(
+            r"(?<![\u0c00-\u0c7fA-Za-z])హలో[,.!?]?[ \t]+"
+            r"([\u0c00-\u0c7f]+(?:[ \t]+[\u0c00-\u0c7f]+)?)[,.!?][ \t]+నమస్తే"
+            r"(?![\u0c00-\u0c7fA-Za-z])"
+        )
+        self.telugu_name_confirmation = re.compile(
+            rf"(?<![\u0c00-\u0c7f])పేరు[ \t]+(?:ఏంది|ఏంటి|ఏమిటి)[ \t]+({_NAME_WORD}?)[ \t]*నా[ \t]*\?"
+        )
+        self.telugu_referred_person = re.compile(
+            r"(?<![\u0c00-\u0c7f])అదే[ \t]+([\u0c00-\u0c7f]+[ \t]+[\u0c00-\u0c7f]+)"
+            r"[ \t]+గారికి(?![\u0c00-\u0c7f])"
+        )
+        telugu_name = r"[\u0c00-\u0c7f]{3,40}"
+        self.telugu_named_event = re.compile(
+            rf"(?<![\u0c00-\u0c7f])({telugu_name})[ \t]+"
+            rf"(?:వచ్చాడు[ \t]+డ్యూటీకి|కాల్[ \t]+చే(?:శా|సా)డు[.!?][ \t]+నాకు|"
+            rf"వచ్చిండు,[ \t]+{telugu_name}[ \t]+డాక్టర్)(?![\u0c00-\u0c7f])"
+        )
+        self.telugu_caller = re.compile(
+            rf"ఫోన్[ \t]+(?:చేసింది|చేశారు)[ \t]+ఎవరు\?[ \t]+"
+            rf"(?:[^.!?\n]{{1,32}}\?[ \t]+)?({telugu_name})[ \t]+"
+            r"(?:మేడం|సార్)(?![\u0c00-\u0c7f])"
+        )
+        latin_name = r"[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}"
+        self.credited_person = re.compile(
+            rf"(?i:\bdone by)[ \t]+({latin_name})[ \t]+(?i:on)[ \t]+"
+            rf"(?=(?:0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?[ \t]+(?i:{_MONTH})[ \t]+(?:19|20)\d{{2}}\b)"
+        )
+        self.english_named_patient = re.compile(
+            rf"(?<![\w'])({latin_name})[ \t]+(?i:ma['’]am|sir)[ \t]+(?i:is the patient)\b"
+        )
         self.honorific_regex = re.compile(
             rf"(?<!\w)({_NAME_WORD})[ \t]+(?:గారు|గారా|గారికి)(?!\w)")
         self.recipient_regex = re.compile(
@@ -416,6 +452,10 @@ class IndicNameContextRecognizer(KeyedGroupRecognizer):
         results = []
         names = load_person_name_gazetteer()
         for pattern, explicit in ((self.explicit_regex, True),(self.question_regex, True),
+                                  (self.telugu_named_person, True),(self.telugu_greeted_person, True),
+                                  (self.telugu_name_confirmation, True),(self.telugu_referred_person, True),
+                                  (self.telugu_named_event, True),(self.telugu_caller, True),
+                                  (self.credited_person, True),(self.english_named_patient, True),
                                   (self.recipient_regex, True),(self.self_intro_regex, True),
                                   (self.hindi_intro_regex, True),
                                   (self.telugu_intro_regex, True),
@@ -424,16 +464,26 @@ class IndicNameContextRecognizer(KeyedGroupRecognizer):
                                   (self.honorific_regex, False)):
             for match in pattern.finditer(text):
                 start, end = match.span(1)
-                if pattern is self.hindi_intro_regex and (
-                    not self.hindi_identity_followup.match(text[match.end():match.end()+100])
-                    or any(word in _HINDI_INTRO_PREDICATES for word in match.group(1).split())
-                ):
-                    continue
-                if pattern is self.telugu_intro_regex and (
-                    not self.telugu_identity_followup.match(text[match.end():match.end()+100])
-                    or any(_TELUGU_INTRO_PREDICATES.fullmatch(word) for word in match.group(1).split())
-                ):
-                    continue
+                if pattern in {self.telugu_named_event, self.telugu_caller}:
+                    value = match.group(1)
+                    if value in {"అతను", "ఆయన", "ఆమె", "ఎవరు", "ఎవరో", "వాళ్లు", "సరే", "అవును"} or _TELUGU_INTRO_PREDICATES.fullmatch(value):
+                        continue
+                    if (pattern is self.telugu_named_event and match.group().endswith("డాక్టర్")
+                            and not re.search(r"(?:ముందు[ \t]+)?ఈ[ \t]+$", text[max(0, start-22):start])):
+                        continue
+                if pattern is self.hindi_intro_regex:
+                    value = match.group(1)
+                    listed = (unicodedata.normalize("NFKC", value).casefold() in names
+                              and match.group().endswith(("हूँ", "हूं")))
+                    if (not listed and not self.hindi_identity_followup.match(text[match.end():match.end()+100])
+                            or any(word in _HINDI_INTRO_PREDICATES for word in value.split())):
+                        continue
+                if pattern is self.telugu_intro_regex:
+                    words = match.group(1).split()
+                    caller = len(words) <= 2 and re.search(r"హలో[,.!? \t]+(?:ఆ[,.!? \t]+)?$", text[max(0, match.start()-30):match.start()])
+                    if (not caller and not self.telugu_identity_followup.match(text[match.end():match.end()+100])
+                            or any(_TELUGU_INTRO_PREDICATES.fullmatch(word) for word in words)):
+                        continue
                 if pattern is self.regex:
                     prelude=re.match(r"chart\s+mein\s+",text[start:end],re.I)
                     if prelude:
@@ -449,6 +499,11 @@ class IndicNameContextRecognizer(KeyedGroupRecognizer):
                 surface = text[start:end].rstrip()
                 end = start + len(surface)
                 if _OBJECT_NAME_FRAME.search(text[max(0,start-70):start]):
+                    continue
+                if pattern is self.telugu_named_person and re.search(
+                    r"(?:మందు|మాత్ర|టాబ్లెట్|క్యాప్సూల్|ఇంజెక్షన్|వ్యాధి)[^.?!;\n]{0,25}$",
+                    text[max(0, start-45):start],
+                ):
                     continue
                 # Stop before predicates, identity labels, and politeness
                 # particles, including captures longer than two words.
@@ -500,6 +555,7 @@ class IndicNameContextRecognizer(KeyedGroupRecognizer):
                     end = start + len(surface.rsplit(None, 1)[0])
                 results.append(RecognizerResult("PERSON", start, end, self.score,
                     recognition_metadata={"recognizer_name": self.name, "recognizer_identifier": self.id,
+                                          "suffix_separated": pattern is self.telugu_name_confirmation,
                                           "boundary_evidence": "patient_introduction" if pattern in
                                           {self.self_intro_regex, self.hindi_intro_regex, self.telugu_intro_regex,
                                            self.opening_intro_regex} else
@@ -523,7 +579,7 @@ class TeluguNameCueRecognizer(EntityRecognizer):
         (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:నా|మా|నీ|మీ)\s+(?:అమ్మ|నాన్న|అబ్బాయి|అమ్మాయి|కొడుకు|కూతురు|భర్త|భార్య|తండ్రి|తల్లి)\s+పేరు\s*[:：=-]?\s*"), "explicit_name"),
         (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:నా|మా|నీ|మీ|తండ్రి|తల్లి|భర్త|భార్య|రోగి|పేషెంట్)\s+పేరు\s*[:：=-]?\s*|(?<![\u0C00-\u0C7FA-Za-z])పేరు\s*[:：]\s*"), "explicit_name"),
         (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:మా|నా)\s+(?:అమ్మ|నాన్న|అబ్బాయి|అమ్మాయి|కొడుకు|కూతురు|భర్త|భార్య)\s+"), "identity_relation"),
-        (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:నేను|నన్ను)\s+"), "patient_introduction"),
+        (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:నేను|(?P<nickname>నన్ను))\s+"), "patient_introduction"),
         (re.compile(r"(?<![A-Za-z])(?:naa?|ma|mee)\s+peru\s*(?:is|:|=)?\s+|(?<![A-Za-z])nenu\s+|(?<![A-Za-z])nannu\s+", re.I), "patient_introduction"),
         (re.compile(r"(?<![\u0C00-\u0C7FA-Za-z])(?:శ్రీమతి|శ్రీ|డాక్టర్|డా\.)\s+"), "person_honorific"),
     )
@@ -540,12 +596,13 @@ class TeluguNameCueRecognizer(EntityRecognizer):
     # identity evidence; the cue by itself cannot turn the next clause into PII.
     _NAME_ENDING = re.compile(r"(?:రావు|రెడ్డి|రాజు|కుమార్|కుమారి|లక్ష్మి|దేవ్|ప్రసాద్|నాథ్|మ్మ|య్య)$")
     _IDENTITY_AFTER = re.compile(
-        r"^\s*(?:[,.!?]\s*)?(?:(?:వయసు|వయస్సు|ఏజ్|age)\s*[:=]?\s*)?"
+        r"^\s*(?:[,.!?]\s*)?(?:(?:వయసు|వయస్సు|ఏజ్|age|నాకు)\s*[:=]?\s*)?"
         r"(?:[1-9][0-9]?\s*(?:ఏళ్లు|ఏళ్ళు|సంవత్సరాలు|ఇయర్స్|years?|yrs?)(?![\u0c00-\u0c7fA-Za-z])|"
         r"(?:అని\s+(?:పిలుస్తారు|అంటారు))|(?:గారు|గారా|గారూ)(?![\u0c00-\u0c7f]))",
         re.I,
     )
-    _VALUE_LABEL = re.compile(r"^(?:నంబర్|నెంబర్|నంబరు|number|name)\s+", re.I)
+    _VALUE_LABEL = re.compile(r"^(?:నంబర్|నబ్బర్|నెంబర్|నంబరు|number|name)\s+", re.I)
+    _NICKNAME_AFTER = re.compile(r"[ \t]+(?:అని[ \t]+)?(?:అంటారు|పిలుస్తారు)(?![\u0c00-\u0c7f])")
 
     def __init__(self):
         super().__init__(supported_entities=["PERSON"], name="TeluguNameCueRecognizer", supported_language="en")
@@ -635,6 +692,7 @@ class TeluguNameCueRecognizer(EntityRecognizer):
                         start += label.end()
                 if end <= start or is_suppressed("PERSON", text[start:end]) and cue != "explicit_name":
                     continue
+                evidence = cue
                 if cue != "explicit_name":
                     surface = text[start:end]
                     words = surface.split()
@@ -642,6 +700,9 @@ class TeluguNameCueRecognizer(EntityRecognizer):
                                   and not implausible_person(surface))
                     identity_after = bool(self._IDENTITY_AFTER.match(text[end:end + 45]))
                     name_ending = bool(self._NAME_ENDING.search(words[-1])) if words else False
+                    if match.groupdict().get("nickname") and self._NICKNAME_AFTER.match(text, end):
+                        identity_after = True
+                        evidence = "identity_relation"
                     if cue == "patient_introduction" and not (name_shape and (identity_after or name_ending)):
                         continue
                     if cue == "person_honorific" and not (name_shape and (identity_after or name_ending)):
@@ -655,7 +716,7 @@ class TeluguNameCueRecognizer(EntityRecognizer):
                 results.append(RecognizerResult(
                     "PERSON", start, end, .96,
                     recognition_metadata={"recognizer_name": self.name, "recognizer_identifier": self.id,
-                                          "boundary_evidence": cue, "suffix_separated": suffix_separated},
+                                          "boundary_evidence": evidence, "suffix_separated": suffix_separated},
                 ))
         return list({(r.start, r.end): r for r in results}.values())
 
@@ -801,6 +862,7 @@ _HISTORICAL_AGE = re.compile(
     r"ఏజ్\s*(?:అట్|ఆఫ్|ఇస్))\s*[.:]?\s*(\d{1,3})(?!\d)", re.I,
 )
 _AGE_AFTER_UNIT = re.compile(r"^[\s.,;:!?]*(?:age\b|ఏజ్|వయసు|ವಯಸ್ಸು|उम्र)", re.I)
+_AGE_WEIGHT_AFTER = re.compile(r"^[ \t]*[,;][ \t]*\d{1,3}(?:\.\d+)?[ \t]*(?:kgs?\b|కేజీలు)", re.I)
 _AGE_WITH_SUFFIX = re.compile(
     r"(?<!\w)(\d{1,3})\s*(?:సంవత్సరాల\s+వయసు(?:లో)?|ఇయర్స్\s+ఏజ్|"
     r"సంవత్సరాలు\s+వచ్చాయి|years?\s+of\s+age|ఏజ్)(?!\w)", re.I)
@@ -867,10 +929,11 @@ class AgeRecognizer(KeyedGroupRecognizer):
                                       "source": "rule",
                                       "boundary_evidence": evidence},
             ))
+        has_telugu = bool(re.search(r"[\u0c00-\u0c7f]", text))
         for match in _TELUGU_AGE_VALUE.finditer(text):
             # English units are shared spellings; apply the Telugu-specific
             # whole-span rule only where Telugu script or a Telugu age cue is present.
-            if not re.search(r"[\u0c00-\u0c7f]", text) and not _TELUGU_AGE_CUE.search(text[max(0, match.start() - 70):match.start()]):
+            if not has_telugu and not _TELUGU_AGE_CUE.search(text[max(0, match.start() - 70):match.start()]):
                 continue
             number = parse_telugu_number(match.group("number"))
             if number is None or not 0 < number <= 120:
@@ -928,7 +991,7 @@ class AgeRecognizer(KeyedGroupRecognizer):
             before = text[max(0, start - 40):start]
             if not (0 < int(match.group(1)) <= 120) or age_is_duration(text,start,end):
                 continue
-            if (_AGE_SEX.match(after) or _AGE_AFTER_UNIT.match(after)
+            if (_AGE_SEX.match(after) or _AGE_AFTER_UNIT.match(after) or _AGE_WEIGHT_AFTER.match(after)
                     or has_historical_age_context(text, start)
                     or (_AGE_SELF_FRAME.search(before) and _AGE_FOLLOWING.match(after))):
                 results.append(RecognizerResult(
@@ -1098,6 +1161,10 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
             rf"[ \t]+(?:వెళ్లాను|వెళ్ళాను|వెళ్లాం|వెళ్ళాం|వచ్చాను|వచ్చాము)(?![\u0C00-\u0C7F])",
             re.I,
         )
+        self.telugu_destination_question = re.compile(
+            rf"(?:మళ్ళా|మళ్లీ|తిరిగి)[ \t]+(?P<place>{value})[ \t]+"
+            r"(?:పోతారా|వెళ్తారా|వెళ్ళతారా)\?[ \t]+ఇక్కడే[ \t]+ఉంటారా"
+        )
         self.telugu_belonging = re.compile(
             rf"(?:మాది|మా\s+ఊరు|నా\s+ఊరు)\s*[:=]?[ \t]+(?P<place>{field_value})"
             rf"(?=$|[\s,.;!?।॥])", re.I,
@@ -1144,10 +1211,19 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
         self.question_field = re.compile(
             rf"(?:from\s+where\s+are\s+you|where\s+are\s+you\s+from|where\s+do\s+you\s+live|"
             rf"ఏ\s*ఊరు\s*మీది|మీది\s*ఏ\s*ఊరు|మీ\s*ఊరు\s*ఎక్కడ|"
+            rf"(?:మీరు[ \t]+)?ఏ[ \t]+(?:ఊరిలో|ఊర్లో|గ్రామంలో|పట్టణంలో)[ \t]+(?:ఉంటారు|ఉంటున్నారు|నివసిస్తున్నారు)|"
             rf"మీరు[ \t]+ఎక్కడ[ \t]+(?:నివసిస్తున్నారు|ఉంటున్నారు|ఉంటారు)|"
             rf"आप\s*कहाँ\s*रहते\s*हैं|તમારું\s*ગામ\s*કયું\s*છે|"
             rf"உங்கள்\s*ஊர்\s*எது|ನಿಮ್ಮ\s*ಊರು\s*ಯಾವುದು)"
             rf"\s*[?.:,—-]+\s*(?:from\s*[?.:,—-]+\s*)?({_NAME_WORD}(?:[ \t]+{_NAME_WORD})?)",re.I)
+        self.address_answer_echo = re.compile(
+            rf",[ \t]*(?P<place>{field_value})\.[ \t]*(?P<echo>(?P=place))[ \t]+"
+            r"(?:గవర్నమెంట్|ప్రభుత్వ)[ \t]+(?:హాస్పిటల్|ఆసుపత్రి)"
+        )
+        self.travel_case = re.compile(
+            r"(?<![\u0c00-\u0c7f])(?P<place>[\u0c00-\u0c7f]{3,40}?)[ \t]*[\u200c\u200d]?"
+            r"(?P<case>లో|కి|కు)(?![\u0c00-\u0c7f])"
+        )
         self.asr_address = re.compile(rf"\bmy\s+interest\s*(?:is|:)\s*({_NAME_WORD})",re.I)
         # First-person residence + a locative suffix supplies identity context
         # without requiring the place to occur in a closed gazetteer. Capture
@@ -1214,9 +1290,13 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
                                       "boundary_evidence": "explicit_residence"}))
         # Gazetteer contents are pinned; workers reload them on restart.
         if self.place_pattern is not None:
+            case = r"[ \t]*[\u200c\u200d]?"
+            locative = rf"{case}లో(?![\u0c00-\u0c7f])"
+            departure = r"[ \t]+వె(?:ళ్లి|ళ్ళి)పోవాలి"
             for match in self.place_pattern.finditer(text):
                 start, end = match.span(1)
                 before, after = text[max(0, start-60):start], text[end:end+60]
+                telugu_place = bool(re.search(r"[\u0c00-\u0c7f]", match[1]))
                 personal = bool(
                     re.search(r"(?:నాది|మాది|నా\s+ఊరు|మా\s+ఊరు)[\s,]*$", before)
                     or
@@ -1228,12 +1308,26 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
                     re.match(r"(?:થી\s*(?:આવ્યો|આવી|આવ્યા)|\s+(?:જઈને|ગયો|ગઈ|રહું|રહીએ))", after)
                     or re.match(r"\s+(?:నుంచి|నుండి)\s+(?:వస్తున్నాను|వచ్చాను|వచ్చాము|వస్తున్నాం)(?!\w)", after)
                     or re.search(r"\bi\s+(?:went|travelled|traveled|live|stayed|came)\s+(?:to|in|at|from)\s*$", before, re.I)
+                    or telugu_place and (
+                        re.search(r"(?:వెళ్తున్నా|మాట్లాడుతున్నా(?:ను|డు|రు)?|ఏం\s+చేస్తున్నావ్|ఉన్నావ్)[,. \t]*$", before)
+                        and re.match(locative, after)
+                        or re.match(rf"{case}(?:కి|కు)[ \t]+(?:పోయి|వచ్చేవాళ్లు)(?![\u0c00-\u0c7f])", after)
+                        or re.match(rf"{case}(?:నుంచి|నుండి)[.!?, \t]+ఎప్పుడు[ \t]+వచ్చారు", after)
+                        or re.match(rf"{departure}(?![\u0c00-\u0c7f])", after)
+                        or re.search(r"డ్రైవింగ్|కారు|బయలుదేర", before)
+                        and re.match(r"[ \t]+\d{1,2}[ \t]+గంటలకు[^.!?\n]{1,55}దగ్గర", after)
+                    )
                 )
                 repeated = any(
                     r.end <= start and start-r.end <= 45 and
                     text[r.start:r.end].casefold() == match.group(1).casefold() and
-                    re.fullmatch(r"[\s.,]*(?:(?:गया|गई|గయా)[\s.,]*)?", text[r.end:start]) and
-                    re.match(r"\s*(?:में|లో|in\b)", after, re.I)
+                    (re.fullmatch(r"[\s.,]*(?:(?:गया|गई|గయా)[\s.,]*)?", text[r.end:start])
+                     and re.match(r"\s*(?:में|లో|in\b)", after, re.I)
+                     or telugu_place and (
+                         re.match(locative, after) and re.fullmatch(rf"{locative}[.,!? \t]+", text[r.end:start])
+                         or re.match(rf"{case}(?:కి|కు)(?![\u0c00-\u0c7f])", after)
+                         and re.fullmatch(rf"{departure}[ \t]+", text[r.end:start])
+                     ))
                     for r in results
                 )
                 if personal or repeated:
@@ -1268,6 +1362,12 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
             # A brief correction/repetition after the answer is evidence only
             # inside this same address Q&A, not every "huh" in a transcript.
             tail = text[end:end+90]
+            if echo := self.address_answer_echo.match(tail):
+                for group in ("place", "echo"):
+                    a, b = echo.span(group)
+                    results.append(RecognizerResult("address", end + a, end + b, .85,
+                        recognition_metadata={"recognizer_name": self.name, "recognizer_identifier": self.id,
+                                              "boundary_evidence": "address_answer"}))
             for correction in re.finditer(rf"^[\s.,]*(?:huh\s*\?|[?])\s*({_NAME_WORD})(?:,\s*({_NAME_WORD}))?",tail,re.I):
                 for group in (1,2):
                     a,b = correction.span(group)
@@ -1276,6 +1376,14 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
                     results.append(RecognizerResult("address",end+a,end+b,.8,
                         recognition_metadata={"recognizer_name":self.name,"recognizer_identifier":self.id,
                                               "boundary_evidence":"address_answer_variant"}))
+                if correction[2] and (confirmed := re.match(
+                    rf"\.[ \t]+({_NAME_WORD})\.[ \t]+okay\b", tail[correction.end():], re.I,
+                )):
+                    a, b = confirmed.span(1)
+                    offset = end + correction.end()
+                    results.append(RecognizerResult("address", offset + a, offset + b, .85,
+                        recognition_metadata={"recognizer_name": self.name, "recognizer_identifier": self.id,
+                                              "boundary_evidence": "address_answer"}))
         # Unlisted villages can be recovered from an actual personal workplace
         # or origin discussion plus a local place relation. The suffix alone
         # never makes a word PII.
@@ -1335,10 +1443,35 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
             "home", "hospital", "here", "there", "place", "ooru", "intlo",
         }
         results = []
+        passport = r"పాస్[\u200c\u200d \t]*పోర్ట్|వీసా"
+        tour = r"టూర్|ప్రయాణం"
+        if re.search(rf"{passport}|{tour}", text):
+            groups = {}
+            for match in self.travel_case.finditer(text):
+                groups.setdefault(match["place"], []).append(match)
+            for place, mentions in groups.items():
+                if place in generic or is_suppressed("LOCATION", place):
+                    continue
+                cases = {m["case"] for m in mentions}
+                cross_border = ("లో" in cases and bool(cases & {"కి", "కు"})
+                                and any(re.search(passport, text[max(0, m.start()-70):m.end()+100]) for m in mentions)
+                                and any(re.search(r"అక్కడ[ \t]*$", text[max(0, m.start()-28):m.start()]) for m in mentions))
+                tour_answer = any(re.search(rf"(?:{tour})[\u200c\u200d]?(?:కి|కు)?[.!?, \t]+$",
+                                            text[max(0, m.start()-30):m.start()]) for m in mentions)
+                group_trip = (list(re.finditer(rf"(?<![\u0c00-\u0c7f])({re.escape(place)})[ \t]+"
+                                             r"(?:పోదాం|వెళ్దాం|వెళ్ళుదాం)(?![\u0c00-\u0c7f])", text))
+                              if tour_answer else [])
+                if cross_border or group_trip:
+                    spans = {m.span("place") for m in mentions} | {m.span(1) for m in group_trip}
+                    for start, end in sorted(spans):
+                        results.append(RecognizerResult("address", start, end, .86,
+                            recognition_metadata={"recognizer_name": self.name, "recognizer_identifier": self.id,
+                                                  "boundary_evidence": "personal_destination"}))
         frames = (
             (self.telugu_residence_cue, "personal_residence", .88),
             (self.telugu_origin_cue, "personal_origin", .88),
             (self.telugu_destination, "personal_destination", .86),
+            (self.telugu_destination_question, "personal_destination", .86),
             (self.telugu_belonging, "personal_hometown", .87),
             (self.telugu_field, "explicit_place_field", .9),
             (self.roman_residence, "romanized_personal_residence", .86),
@@ -1363,6 +1496,10 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
                         end = start + len(surface)
                         break
                 if not surface or surface.casefold() in generic or is_suppressed("LOCATION", surface):
+                    continue
+                if (evidence == "explicit_place_field" and surface.casefold() not in self.places
+                        and re.search(r"(?:ఒక[ \t]+ఊరు|ఈ[ \t]+జిల్లా)[ \t]*$", text[max(0, start-28):start])
+                        and not re.match(r"[ \t]*(?:లో|నుంచి|నుండి)[ \t]+(?:ఉంటా|వచ్చా|నివసి)", text[end:])):
                     continue
                 if evidence in {"personal_hometown", "explicit_place_field"}:
                     stem, attached_suffix = split_telugu_suffix(surface, kind="place")
@@ -1406,7 +1543,12 @@ class SpokenPlaceRecognizer(KeyedGroupRecognizer):
             place_root = surface.split()[-1] if surface.split() else ""
             place_shape = bool(re.search(r"(?:పల్లి|పేట|పాడు|పురం|నగర్|వాడ|గ్రామం|కోట|కుంట|గూడెం)$", place_root))
             if not (surface.casefold() in self.places or place_shape):
-                continue
+                if self.place_pattern is None:
+                    continue
+                suffix_match = next((m for m in self.place_pattern.finditer(surface) if m.end() == len(surface)), None)
+                if suffix_match is None:
+                    continue
+                start += suffix_match.start(1)
             results.append(RecognizerResult("address", start, end, .84 if personal else .76,
                 recognition_metadata={"recognizer_name": self.name,
                                       "recognizer_identifier": self.id,

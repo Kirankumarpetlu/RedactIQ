@@ -58,3 +58,9 @@ def test_spacy_latin_proposal_remains_available():
                              _enhance_using_context=lambda text, results, artifacts, selected, context: results)
     assert len(run_recognizers(engine, "Ravi", "en", [FakeRecognizer()], artifacts=object())) == 1
     assert len(run_recognizers(engine, "Ravi రవి", "en", [FakeRecognizer()], artifacts=object())) == 1
+
+
+def test_ignored_only_recognizers_are_skipped_before_analysis():
+    url_only = SimpleNamespace(supported_entities=["URL"])
+    assert run_recognizers(SimpleNamespace(), "https://example.invalid", "en", [url_only],
+                           artifacts=object(), ignored_labels={"URL"}) == []

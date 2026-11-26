@@ -324,6 +324,10 @@ def identifier_rejection_reason(text: str, entity: Mapping[str, Any]) -> str | N
             return "clinical_analyte_not_diagnosis_code"
         if _KEYBOARD_CONTEXT.search(around) or _CLINICAL_CODE_CONTEXT.search(around):
             return "ordinary_code_not_diagnosis"
+        if re.search(r"\bwhat\s+is\b", before[-25:], re.I) and re.match(
+            r"[.!? \t]+\d+(?:\.\d+)?\s*%\s*sugar\b", text[b:b+30], re.I,
+        ):
+            return "ordinary_code_not_diagnosis"
     if label in {"account_number","bank_account"} and (_MONEY_CONTEXT.search(around) or _LAB_EXPRESSION.search(around)):
         return "quantity_not_account_identifier"
     if label in {"national_id_number","passport_number","license_number"} and not any(c.isdigit() for c in surface):
@@ -430,6 +434,8 @@ def contextual_rejection_reason(text: str, entity: Mapping[str, Any]) -> str | N
     if (normalized in _CLINICAL_ANALYTE and _ANALYTE_CONTEXT.search(before+surface+after)
             and not has_person_identity_context(text, entity)):
         return "clinical_analyte_not_name"
+    if normalized in {"rich", "balanced", "healthy"} and re.match(r"\s+diet\b", after, re.I):
+        return "dietary_expression_not_name"
     dietary_words = normalized.split()
     dietary_context = text[max(0, start-100):end+100]
     dietary_hits = {normalise_span(word) for word in dietary_context.split()} & _DIETARY_WORDS

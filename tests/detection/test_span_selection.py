@@ -88,6 +88,7 @@ def test_measurement_units_precede_digit_density(value):
     ("హలో, బీపీ చూడండి.","బీపీ","first_name"),
     ("Windows screenshot uses F11.","F11","ICD10_CODE"),
     ("Take vitamin B12 daily.","B12","ICD10_CODE"),
+    ("What is that reading? T34. 20% sugar.", "T34", "ICD10_CODE"),
     ("Oxygen O2 was discussed.","O2","US_DRIVER_LICENSE"),
     ("Give 150000 for the sponsor loan.","150000","MEDICAL_RECORD_NUMBER"),
     ("The cost is 3000-4000.","3000-4000","PHONE_NUMBER"),

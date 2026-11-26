@@ -114,7 +114,7 @@ def _prepare_candidates(text, routed):
     return candidates
 
 
-def gap_spans(text, trusted=()):
+def gap_spans(text, trusted=(), *, include_unanchored_names=True, include_locative_repeats=False):
     """Propose bounded spans with offsets from the original text."""
     hints = {}
     for label, pattern in GAP_HINTS:
@@ -137,9 +137,12 @@ def gap_spans(text, trusted=()):
         surface = text[candidate["start"]:candidate["end"]]
         if candidate_script(surface) != "telugu":
             continue
-        for match in re.finditer(rf"(?<!{word_char}){re.escape(surface)}(?!{word_char})", text):
+        boundary = rf"(?!{word_char})"
+        if label == "LOCATION" and include_locative_repeats:
+            boundary = rf"(?:{boundary}|(?=[\u200c\u200d]?(?:లో|కి|కు|నుంచి|నుండి)(?!{word_char})))"
+        for match in re.finditer(rf"(?<!{word_char}){re.escape(surface)}{boundary}", text):
             hints.setdefault(match.span(), label)
-    words = segment_words(text)
+    words = segment_words(text) if include_unanchored_names else ()
     for i, word in enumerate(words):
         script = candidate_script(word.text)
         if script == "latin":
@@ -163,7 +166,7 @@ def gap_spans(text, trusted=()):
 
 class OpenRouterDecider:
     inference_backend = "openrouter:perplexity/pplx-decider-flash-v1.2-20261016"
-    confirmation_skips = frozenset()
+    confirm_fallback = True
     settings = {
         "model": MODEL, "endpoint": ENDPOINT, "instructions_version": INSTRUCTIONS_VERSION,
         "acceptance_threshold": ACCEPT, "reject_threshold": REJECT, "relabel_threshold": RELABEL,
@@ -238,11 +241,13 @@ class OpenRouterDecider:
         if result is None:
             raise RuntimeError(f"OpenRouter Decider startup probe failed ({error}).")
 
-    def analyze(self, text, routed):
+    def analyze(self, text, routed, *, validated_tags=()):
         self.verify_input(text)
         candidates = _prepare_candidates(text, routed)
         trusted = [candidate for candidate in candidates if _validated(candidate)]
         covered = [(c["start"], c["end"]) for c in trusted]
+        corroborated = {(tag["start"], tag["end"], tag["canonical_entity_type"]) for tag in validated_tags
+                        if tag["canonical_entity_type"] in {"PERSON", "LOCATION"}}
         decisions = []
         kept = []
         trace = []
@@ -265,7 +270,8 @@ class OpenRouterDecider:
             decisions.append((tier, candidate))
 
         boundaries = {(c["start"], c["end"]) for c in candidates}
-        for start, end, hint in gap_spans(text, trusted):
+        boundaries.update((start, end) for start, end, _ in corroborated)
+        for start, end, hint in gap_spans(text, (*trusted, *validated_tags)):
             if (start, end) in boundaries:
                 continue
             indic = candidate_script(text[start:end]) not in {"latin", "other", "numeric"}
@@ -296,11 +302,15 @@ class OpenRouterDecider:
                 counts["fallback_confirmed"] += 1
                 kept.append(candidate)
                 continue
-            if tier == 4 and candidate["recognizer"] in self.confirmation_skips:
+            if tier == 4 and not self.confirm_fallback:
                 details["reason"] = "confirmation_does_not_change_selection"
                 candidate.update(fallback_confirmed=False, fallback_source="decider_unconfirmed")
                 kept.append(candidate)
                 counts["fallback_unconfirmed_but_kept"] += 1
+                continue
+            if tier == 2 and (start, end, canonical_entity_type(label)) in corroborated:
+                details["reason"] = "corroborated_by_validated_tag"
+                kept.append(candidate)
                 continue
             if sum(map(len, requests.values())) >= MAX_CANDIDATES:
                 details["reason"] = "candidate_cap"
@@ -378,8 +388,9 @@ class LocalLightningDecider(OpenRouterDecider):
     model = "h2oai/h2o-lightning-4b"
     inference_backend = f"llama.cpp:{model}"
     instructions = INSTRUCTIONS.replace("fictional clinical transcript", "clinical transcript")
-    # Tier 4 keeps these contextual age spans on either model answer.
-    confirmation_skips = frozenset({"AgeRecognizer"})
+    # Tier 4 answers annotate candidates, but the span policy never uses the answer to select them.
+    confirm_fallback = False
+    uses_semantic_tags = True
 
     def __init__(self, port, *, transport=None):
         if type(port) is not int or not 1 <= port <= 65535:
@@ -387,7 +398,7 @@ class LocalLightningDecider(OpenRouterDecider):
         self.settings = {
             **self.settings, "model": self.model, "endpoint": f"http://127.0.0.1:{port}/v1/systemone",
             "backend": "local_llama_cpp", "device": "server-managed", "synthetic_only": False,
-            "gap_decision": "hint_or_not_pii", "age_confirmation": "rule",
+            "gap_decision": "hint_or_not_pii", "age_confirmation": "rule", "fallback_confirmation": "skipped",
         }
         self._init_client(httpx.Client(timeout=60, trust_env=False, transport=transport))
 
@@ -417,8 +428,55 @@ class LocalLightningDecider(OpenRouterDecider):
     def warm(self):
         self._decide("confirm", "fictional person name", "Test only: [Mira Sample].")
 
-    def analyze(self, text, routed):
-        kept, counts, trace = super().analyze(text, routed)
+    def analyze(self, text, routed, *, validated_tags=()):
+        kept, counts, trace = super().analyze(text, routed, validated_tags=validated_tags)
         if counts["decider_failed"]:
             raise RuntimeError("The local decider could not score all candidates in the row.")
         return kept, counts, trace
+
+
+class LocalRulesDecider:
+    """Run candidate selection without waiting for a model server."""
+
+    inference_backend = "local:rules"
+    uses_semantic_tags = True
+    settings = {"model": "local rules", "backend": "local_rules", "synthetic_only": False,
+                "acceptance_threshold": ACCEPT}
+
+    def verify_input(self, text):
+        if not isinstance(text, str):
+            raise ValueError("The local decider requires text.")
+
+    def warm(self):
+        pass
+
+    def close(self):
+        pass
+
+    def analyze(self, text, routed, *, validated_tags=()):
+        self.verify_input(text)
+        candidates = _prepare_candidates(text, routed)
+        fallback_count = len(routed.needs_fallback)
+        trusted = [c for c in candidates if _validated(c)]
+        covered = [(c["start"], c["end"]) for c in (*trusted, *validated_tags)]
+        repeated_places = [c for c in candidates if c["recognizer"] == "SpokenPlaceRecognizer"
+                           and c["recognition_metadata"].get("boundary_evidence") in {"personal_place_frame", "landmark_relation"}]
+        repeatable_tags = [tag for tag in validated_tags if not (
+            tag["canonical_entity_type"] == "PERSON"
+            and re.search(r"పేరు[^.!?]{0,12}మర్చిపోయాను", text[max(0, tag["start"] - 55):tag["start"]])
+            and "కాదు" in text[tag["end"]:tag["end"] + 55]
+        )]
+        for start, end, label in gap_spans(text, (*trusted, *repeated_places, *repeatable_tags),
+                                          include_unanchored_names=False, include_locative_repeats=True):
+            if any(a <= start and end <= b for a, b in covered):
+                continue
+            candidates.append({
+                "start": start, "end": end, "entity_type": label, "score": ACCEPT,
+                "source": "resolved", "recognizer": "BoundedGapRule",
+            })
+        return candidates, {
+            "resolved_no_fallback_needed": len(routed.resolved),
+            "routed_to_gliner2_vanilla_fallback": fallback_count,
+            "fallback_confirmed": 0, "fallback_unconfirmed_but_kept": fallback_count,
+            "decider_calls": 0, "decider_cache_hits": 0, "decider_failed": 0,
+        }, []

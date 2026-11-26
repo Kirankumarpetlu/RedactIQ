@@ -42,10 +42,12 @@ _EVENT = re.compile(
     r"\b(?:dob|born|birth|date|visit|appointment|consultation|seen|came|tested|testing|"
     r"admitted|discharged|surgery|operation|lmp|last\s+period|menstrual\s+period|"
     r"treatment\s*(?:started|starts?|began)|last\s+test|test\s*(?:done|was)|"
+    r"done\s+by[^.!?\n]{1,60}\bon|"
     r"(?:echo|angio|angiogram|scan|procedure)\s*(?:(?:was|is)\s*)?(?:done|performed)|"
     r"blood\s+reports?|investigations?\s*(?:(?:was|were|is|are)\s*)?(?:done|dated))\b|"
     r"ట్రీట్మెంట్|పీరియడ్|తారీకు|తేదీ|చేయించుకున్న|చూయించుకున్న|వచ్చావు|పుట్టిన|"
-    r"ఆపరేషన్|శస్త్రచికిత్స|మందులు\s*వాడ|బ్లడ్\s*రిపోర్ట్స్|ఇన్వెస్టిగేషన్స్\s*డన్|"
+    r"ఆపరేషన్|శస్త్రచికిత్స|మందు(?:లు)?\s*(?:వాడ|తీసు|మొదలు|తాగ)|"
+    r"బ్లడ్\s*రిపోర్ట్స్|ఇన్వెస్టిగేషన్స్\s*డన్|"
     r"(?:ఎకో|ఎక్కో|ఆంజియో|స్కాన్)\s*(?:డన్|చేయించ)|"
     r"तारीख|जन्म|मासिक|ದಿನಾಂಕ|ಜನ್ಮ|தேதி|பிறந்த|எக்கோ(?:ட)?|அறுவை\s*சிகிச்சை", re.I,
 )
@@ -73,11 +75,15 @@ _SPOKEN_DAYS = (
 )
 _SPOKEN_DAY_VALUE = "|".join(re.escape(day) for day in _SPOKEN_DAYS)
 _SPOKEN_DAY = re.compile(rf"(?<!\w)({_SPOKEN_DAY_VALUE})[\s.,]*{_DAY_WORD}(?!\w)", re.I)
+_SPOKEN_DAY_ECHO = re.compile(
+    rf"(?<![\w\u0c00-\u0c7f])(?P<first>{_SPOKEN_DAY_VALUE})[.!?][ \t]+"
+    rf"(?P<second>(?P=first))(?![\w\u0c00-\u0c7f])"
+)
 _MONTH_SPOKEN_DAY = re.compile(rf"ఈ\s+నెల\s+({_SPOKEN_DAY_VALUE})(?!\w)")
 _SPOKEN_DAY_LINK = re.compile(
     rf"(?<!\w)({_SPOKEN_DAY_VALUE})\s+(?:కాబట్టి\s+ఆ\s+డేట్|తర్వాత\s+డేట్)(?!\w)")
 _ONSET_YEAR = re.compile(
-    r"(?<!\d)((?:19|20)\d{2})(?!\d)\s*(?:నుంచి\s*(?:షుగర్|బీపీ|బిపి)\s*(?:కూడా\s*)?ఉంద(?:ా|ి)|"
+    r"(?<!\d)((?:19|20)\d{2})(?!\d)\s*(?:నుంచి\s*(?:షుగర్|బీపీ|బీపి|బిపి)\s*(?:కూడా\s*)?ఉంద(?:ా|ి)|"
     r"(?:diabetes|hypertension)\s*(?:started|began))", re.I)
 _ENGLISH_ONSET_YEAR = re.compile(
     r"\b(?:diagnosed\s+in|(?:diabetes|hypertension)\s+since)\s+((?:19|20)\d{2})(?!\d)", re.I)
@@ -119,7 +125,10 @@ class ClinicalCalendarDateRecognizer(EntityRecognizer):
 
     @staticmethod
     def _has_context(text, start, end):
-        return bool(_EVENT.search(text[max(0, start-100):end+100]))
+        return bool(_EVENT.search(text[max(0, start-100):end+100]) or (
+            re.search(r"మేము[ \t]+$", text[max(0, start-15):start])
+            and re.match(r"[ \t]+చేశాం[.!?।]", text[end:end+20])
+        ))
 
     def analyze(self, text, entities, nlp_artifacts=None):
         if entities and not set(entities) & set(self.supported_entities):
@@ -222,6 +231,13 @@ class ClinicalCalendarDateRecognizer(EntityRecognizer):
                 gap = text[end:seed.start] if end <= seed.start else text[seed.end:start]
                 if len(gap) <= 60 and _DAY_REPEAT_GAP.fullmatch(gap) and not _VALUE_UNIT.match(text[end:]):
                     results.append(self._result(text, start, end, "repeated_calendar_day"))
+        for match in _SPOKEN_DAY_ECHO.finditer(text):
+            if any(r.recognition_metadata["boundary_evidence"] == "explicit_calendar_day"
+                   and text[r.start:r.end] == match["first"]
+                   and abs(r.start - match.start()) <= 160
+                   for r in results):
+                for group in ("first", "second"):
+                    results.append(self._result(text, *match.span(group), "repeated_calendar_day"))
         # A spoken day must not steal part of a complete numeric date from
         # ShortDateRecognizer. This includes hyphen/dot formats, not just
         # slash dates: e.g. "birth date 04-04-1994" is one date, not two days.

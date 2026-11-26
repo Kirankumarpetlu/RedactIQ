@@ -19,6 +19,11 @@ venv.bak/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
+junit.xml
+.tox/
+.nox/
 htmlcov/
 
 # Editor and archive metadata
@@ -34,6 +39,7 @@ __MACOSX/
 /logs/
 /.secrets/
 /benchmarks/results/
+/GPU_performed_outputs/
 
 # Documentation, reports and report-only tools stay local
 /docs/
@@ -43,6 +49,8 @@ __MACOSX/
 *.docx
 /scripts/export_project_report_docx.py
 /scripts/render_report_diagrams.ps1
+/scripts/generate_benchmark_markdown_report.py
+/scripts/plot_redaction_roc.py
 
 # Local asset manifests and review interface
 /DATA_ASSETS.json
@@ -88,3 +96,22 @@ __MACOSX/
 **/models/gliner2-pii-portable/tokenizer.json
 **/models/gliner2-pii-portable/schema_prefix.json
 **/.cache/huggingface/
+
+# Workspace-local settings
+# Local workspace settings and credentials
+.codex/
+.agents/
+.aws/
+.secrets/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Local environments and generated caches
+__pycache__/
+*.py[cod]
+.venv*/
+.pytest_cache/
+.cache/
+*.log

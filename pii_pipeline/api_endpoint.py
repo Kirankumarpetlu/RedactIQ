@@ -1,10 +1,7 @@
 """
 Universal GPU/CPU PII Detection & Redaction API (Stage 9).
 
-Provides 3 public routes:
-1. POST /analyze  - Detailed PII analysis and redacted output
-2. GET /health    - Consolidated system health + metrics
-3. GET /pipeline/metrics - Safe live progress and performance metrics for pipeline runs
+Provides detailed analysis, fast local redaction, and aggregate health and metrics.
 """
 
 from __future__ import annotations
@@ -30,14 +27,20 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from fastapi import Body, FastAPI, HTTPException, Request, Security
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 
 from pii_pipeline.config import load_pipeline_config
+from pii_pipeline.decider_stage import LocalRulesDecider
 from pii_pipeline.model_cache import ModelCache, configure_runtime
 from pii_pipeline.pipeline import Stage9Pipeline
 
 logger = logging.getLogger(__name__)
 _API_KEY_HEADER = APIKeyHeader(name="X-API-Key", scheme_name="PII API key", auto_error=False)
+_RULES_ROLE = "rules-worker"
+_REDACT_PATHS = {"/v1/redact", "/v1/redact/batch"}
 
 
 def _service_role() -> str:
@@ -50,7 +53,7 @@ def require_api_key(provided: Optional[str] = Security(_API_KEY_HEADER)) -> None
     expected = os.getenv("PII_API_KEY")
     if not expected:
         raise HTTPException(status_code=503, detail="API key is not configured")
-    if not provided or not secrets.compare_digest(provided, expected):
+    if not provided or not secrets.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -77,7 +80,7 @@ def get_hardware_info(device: str) -> Dict[str, str]:
 
 _cfg = load_pipeline_config(os.getenv("PII_CONFIG_PATH") or None)
 
-if _service_role() != "gateway":
+if _service_role() not in {"gateway", _RULES_ROLE}:
     # Preload models once at startup into the global cache
     configure_runtime(_cfg.runtime.cpu_threads, _cfg.runtime.enable_mps)
     _MODEL_DEVICE = ModelCache.preload_all(
@@ -145,7 +148,7 @@ def _api_metrics_snapshot(workers_active: int) -> Dict[str, Any]:
         "failed_closed_count": failed_closed_count,
         "avg_latency_ms": round(total_latency_ms / request_count, 2) if request_count else 0.0,
         "workers_active": workers_active,
-        "workers_total": 3,
+        "workers_total": 1 if _service_role() == _RULES_ROLE else 3,
         "service": "pii-stage9",
         "service_role": _service_role(),
         "device": _MODEL_DEVICE,
@@ -162,13 +165,12 @@ def _latest_pipeline_metrics() -> Dict[str, Any]:
     Raw transcript text and detected entity values are intentionally never
     returned by this helper.
     """
-    output_root = Path(project_root) / "data" / "output"
     candidates = []
-    for filename, source in (
-        ("pipeline_progress.json", "live_progress"),
-        ("pipeline_run_summary.json", "completed_run"),
-    ):
-        if output_root.exists():
+    for output_root in (Path(project_root) / "output", Path(project_root) / "data" / "output"):
+        for filename, source in (
+            ("pipeline_progress.json", "live_progress"),
+            ("pipeline_run_summary.json", "completed_run"),
+        ):
             for path in output_root.rglob(filename):
                 try:
                     candidates.append((path.stat().st_mtime, path, source))
@@ -230,7 +232,10 @@ async def lifespan(app: FastAPI):
     global _worker_pipeline, _worker_pipeline_key
     if _service_role() != "gateway":
         with _worker_pipeline_lock:
-            _worker_pipeline = Stage9Pipeline(config=_cfg, device=_MODEL_DEVICE)
+            if _service_role() == _RULES_ROLE:
+                _worker_pipeline = Stage9Pipeline(config=_cfg, device="cpu", decider=LocalRulesDecider())
+            else:
+                _worker_pipeline = Stage9Pipeline(config=_cfg, device=_MODEL_DEVICE)
             _worker_pipeline_key = (_MODEL_DEVICE, _cfg.models.spacy.language, None)
     logger.info("API Server starting with role: %s | device: %s", _service_role(), _MODEL_DEVICE)
     try:
@@ -259,20 +264,30 @@ app = FastAPI(
 
 @app.middleware("http")
 async def record_analyze_metrics(request: Request, call_next):
-    """Track aggregate /analyze performance without retaining PII payloads."""
+    """Track aggregate inference performance without retaining payloads."""
     started_at = time.perf_counter()
     status_code = 500
     try:
         response = await call_next(request)
         status_code = response.status_code
+        if request.url.path in _REDACT_PATHS:
+            response.headers["Cache-Control"] = "no-store"
         return response
     finally:
-        if request.url.path == "/analyze":
+        if request.url.path == "/analyze" or request.url.path in _REDACT_PATHS:
             with _api_metrics_lock:
                 _api_metrics["request_count"] += 1
                 _api_metrics["total_latency_ms"] += (time.perf_counter() - started_at) * 1000
                 if status_code >= 500:
                     _api_metrics["failed_closed_count"] += 1
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path in _REDACT_PATHS:
+        errors = [{key: error[key] for key in ("loc", "msg", "type")} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": errors})
+    return await request_validation_exception_handler(request, exc)
 
 
 # -----------------------------------------------------------
@@ -292,6 +307,58 @@ class AnalyzeRequest(BaseModel):
         None, description="Optional real, existing annotations. Omit or use null for text-only detection; do not send generated placeholder objects.",
     )
     min_entity_score: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class RedactRequest(BaseModel):
+    text: str = Field(max_length=100_000)
+    semantic_tags: list[dict[str, Any]] | None = None
+    min_entity_score: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class RedactResponse(BaseModel):
+    redacted_text: str
+    entity_count: int
+    latency_ms: float
+
+
+class RedactBatchRequest(BaseModel):
+    items: list[RedactRequest] = Field(min_length=1, max_length=100)
+
+
+class RedactBatchResponse(BaseModel):
+    items: list[RedactResponse]
+
+
+def _redact_items(items: list[RedactRequest]) -> list[RedactResponse]:
+    with _worker_pipeline_lock:
+        if _service_role() != _RULES_ROLE or _worker_pipeline is None:
+            raise HTTPException(status_code=503, detail="Local rules worker is unavailable")
+
+        responses = []
+        for item in items:
+            started = time.perf_counter()
+            try:
+                result = _worker_pipeline.run(item.text, semantic_tags=item.semantic_tags,
+                                              min_entity_score=item.min_entity_score)
+                responses.append(RedactResponse(
+                    redacted_text=result["redacted_text"],
+                    entity_count=len(result["entities_detected"]),
+                    latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                ))
+            except Exception:
+                logger.error("Local rules redaction failed")
+                raise HTTPException(status_code=503, detail="Redaction failed") from None
+        return responses
+
+
+@app.post("/v1/redact", summary="Redact one transcript locally", dependencies=[Security(require_api_key)])
+async def redact_endpoint(body: RedactRequest) -> RedactResponse:
+    return (await run_in_threadpool(_redact_items, [body]))[0]
+
+
+@app.post("/v1/redact/batch", summary="Redact a batch locally", dependencies=[Security(require_api_key)])
+async def redact_batch_endpoint(body: RedactBatchRequest) -> RedactBatchResponse:
+    return RedactBatchResponse(items=await run_in_threadpool(_redact_items, body.items))
 
 
 # -----------------------------------------------------------
@@ -350,6 +417,9 @@ async def analyze_endpoint(
 
     # Worker / Direct Execution Mode
     if _service_role() != "gateway":
+        rules_worker = _service_role() == _RULES_ROLE
+        if rules_worker and (threshold is not None or language != _cfg.models.spacy.language):
+            raise HTTPException(status_code=422, detail="Rules worker uses its configured NLP language and no GLiNER threshold")
         # Run pipeline directly using cached models
         global _worker_pipeline, _worker_pipeline_key
         key = (resolved_device, language, threshold)
@@ -357,6 +427,8 @@ async def analyze_endpoint(
             global _worker_pipeline, _worker_pipeline_key
             with _worker_pipeline_lock:
                 if _worker_pipeline is None or _worker_pipeline_key != key:
+                    if rules_worker:
+                        raise HTTPException(status_code=503, detail="Local rules worker is unavailable")
                     replacement = Stage9Pipeline(config=_cfg, device=resolved_device, language=language,
                                                   gliner_threshold=threshold)
                     previous = _worker_pipeline
@@ -374,8 +446,10 @@ async def analyze_endpoint(
             "gpu_name": get_hardware_info(resolved_device).get("current_gpu_name"),
             **result,
             "inference_settings": {
-                "gliner_threshold": threshold if threshold is not None else _cfg.models.gliner_primary.threshold,
-                "gliner_threshold_source": "request" if threshold is not None else "config",
+                "gliner_threshold": None if rules_worker else (
+                    threshold if threshold is not None else _cfg.models.gliner_primary.threshold
+                ),
+                "gliner_threshold_source": "inactive" if rules_worker else ("request" if threshold is not None else "config"),
                 "min_entity_score": min_entity_score,
                 "semantic_tags_supplied": bool(semantic_tags),
             },
@@ -490,6 +564,11 @@ async def health_endpoint():
     if service_role == "gateway":
         workers_info = await _probe_workers()
         workers_active = sum(1 for worker in workers_info.values() if worker["ready"])
+    elif service_role == _RULES_ROLE:
+        ready = _worker_pipeline is not None
+        workers_info = {_RULES_ROLE: {"status": "ready" if ready else "unavailable", "ready": ready,
+                                     "models_loaded": ready, "warmup_complete": ready}}
+        workers_active = int(ready)
     elif service_role in ("gpu-worker", "cpu-worker"):
         workers_info = {
             "gpu_worker_0": {"status": "unknown", "ready": False, "models_loaded": False, "warmup_complete": False},
@@ -523,7 +602,7 @@ async def health_endpoint():
     else:
         overall = "degraded"
 
-    routing_order = ["gpu_worker_0", "gpu_worker_1", "cpu_worker"]
+    routing_order = [_RULES_ROLE] if service_role == _RULES_ROLE else ["gpu_worker_0", "gpu_worker_1", "cpu_worker"]
 
     return {
         "status": overall,
@@ -538,7 +617,8 @@ async def health_endpoint():
         "workers": workers_info,
         "pipeline": {
             "status": "available" if workers_ready > 0 else "unavailable",
-            "availability": "full-quality pipeline " + ("ready" if workers_ready > 0 else "not available"),
+            "availability": ("local rules pipeline " if service_role == _RULES_ROLE else "full-quality pipeline ")
+                            + ("ready" if workers_ready > 0 else "not available"),
         },
         "routing": {
             "available": workers_ready > 0,

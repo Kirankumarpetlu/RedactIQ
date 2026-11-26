@@ -351,7 +351,8 @@ def run_pipeline_on_file(
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             latencies_ms.append(latency_ms)
             if enable_profiling:
-                row_profiles.append({"row_index": i, "latency_ms": latency_ms, "pipeline": res.get("profiling"), "model_status": res.get("model_status")})
+                row_profiles.append({"row_index": row_id, "latency_ms": latency_ms, "pipeline": res.get("profiling"),
+                                     "model_status": res.get("model_status"), "routing_summary": res.get("routing_summary", {})})
 
             out_row = {
                 "row_index": row_id,

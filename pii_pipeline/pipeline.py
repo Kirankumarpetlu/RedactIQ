@@ -283,7 +283,13 @@ class Stage9Pipeline:
         else:
             routed = self._analyze_primary(text, enable_profiling, profiler)
             with profile_context("decider_stage", profiler=profiler):
-                candidates_for_policy, routing_summary, decider_trace = decider.analyze(text, routed)
+                decider_kwargs = {}
+                if imported and getattr(decider, "uses_semantic_tags", False):
+                    validated_tags, _ = resolve_entities(
+                        text, imported, min_entity_score, score_thresholds=score_thresholds,
+                    )
+                    decider_kwargs["validated_tags"] = validated_tags
+                candidates_for_policy, routing_summary, decider_trace = decider.analyze(text, routed, **decider_kwargs)
             indic_diagnostics = {}
 
         # Candidate preparation and policy resolution have different costs.

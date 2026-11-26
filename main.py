@@ -55,12 +55,11 @@ def synthetic_rows():
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--h2o-port", type=int, help="Loopback port of the H2O Lightning llama.cpp server")
-    parser.add_argument("--input", type=lambda path: Path(path).resolve(), help="Input file for the local server")
+    parser.add_argument("--input", type=lambda path: Path(path).resolve(), help="Local input file. Defaults to the fast rules backend unless --h2o-port is set.")
     parser.add_argument("--limit-rows", type=int, default=100)
+    parser.add_argument("--enable-profiling", action="store_true", help="Write stage timings and per-row decision counts")
     parser.add_argument("--save-diagnostics", action="store_true", help="Write per-row candidate diagnostics")
     args = parser.parse_args()
-    if args.input is not None and args.h2o_port is None:
-        parser.error("--input requires --h2o-port so file contents stay local")
     if args.limit_rows < 1:
         parser.error("--limit-rows must be positive")
 
@@ -69,18 +68,24 @@ def main() -> int:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-    from pii_pipeline.decider_stage import LocalLightningDecider, OpenRouterDecider
+    from pii_pipeline.decider_stage import LocalLightningDecider, LocalRulesDecider, OpenRouterDecider
     from pii_pipeline.run_csv_through_stage9 import run_pipeline_on_file
     from scripts.score_pending_groundtruth import score
 
     rows = list(synthetic_rows())[:args.limit_rows] if args.input is None else []
     try:
-        decider = (LocalLightningDecider(args.h2o_port) if args.h2o_port is not None else
-                   OpenRouterDecider(row["context"] for row in rows))
+        if args.h2o_port is not None:
+            decider = LocalLightningDecider(args.h2o_port)
+            backend = "h2o_local"
+        elif args.input is not None:
+            decider = LocalRulesDecider()
+            backend = "rules_local"
+        else:
+            decider = OpenRouterDecider(row["context"] for row in rows)
+            backend = "decider_synthetic"
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
-    backend = "h2o_local" if args.h2o_port is not None else "decider_synthetic"
     run_dir = root / "output" / f"first_{args.limit_rows}_{backend}_{datetime.now():%Y%m%d_%H%M%S_%f}"
     predictions = run_dir / "predictions.csv"
     reference = run_dir / "synthetic_reference.csv"
@@ -97,6 +102,7 @@ def main() -> int:
             config_path="config/pipeline_config.yaml",
             device="cpu",
             max_rows=args.limit_rows,
+            enable_profiling=args.enable_profiling,
             save_diagnostics=args.save_diagnostics or args.input is None,
             decider=decider,
         )

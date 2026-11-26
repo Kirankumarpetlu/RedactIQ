@@ -48,13 +48,17 @@ def _unsupported_spacy_indic_result(result: RecognizerResult, text: str) -> bool
     """
     metadata = result.recognition_metadata or {}
     name = str(metadata.get("recognizer_name", ""))
+    if name != "SpacyRecognizer":
+        return False
     surface = text[result.start:result.end]
-    return name == "SpacyRecognizer" and bool(_INDIC_SCRIPT.search(surface)) and not _LATIN_LETTER.search(surface)
+    return bool(_INDIC_SCRIPT.search(surface)) and not _LATIN_LETTER.search(surface)
 
 
-def run_recognizers(engine, text, language, recognizers=None, artifacts=None, enhance_context=True):
+def run_recognizers(engine, text, language, recognizers=None, artifacts=None, enhance_context=True, *, ignored_labels=()):
     selected = recognizers if recognizers is not None else engine.registry.get_recognizers(
         language=language, all_fields=True, entities=None)
+    if ignored_labels:
+        selected = [rec for rec in selected if not set(rec.supported_entities).issubset(ignored_labels)]
     if artifacts is None:
         artifacts = engine.nlp_engine.process_text(text, language)
     results = []
@@ -69,6 +73,8 @@ def run_recognizers(engine, text, language, recognizers=None, artifacts=None, en
             result.recognition_metadata = metadata
             if not _unsupported_spacy_indic_result(result, text):
                 results.append(result)
+    if not results:
+        return results
     if enhance_context:
         # Presidio's context enhancement is retained; its overlap removal is
         # deliberately deferred to our shared, source-aware span policy.
@@ -206,7 +212,8 @@ class PresidioOrchestrator:
             # return_decision_process carries the recognizer's name on each
             # result, which is what lets the English-only spaCy backbone be told
             # apart from the Indic-aware recognizers below.
-            results = run_recognizers(self.analyzer_engine, text, self.language, artifacts=artifacts)
+            results = run_recognizers(self.analyzer_engine, text, self.language, artifacts=artifacts,
+                                      ignored_labels=self.labels_to_ignore)
 
         with profile_context("taxonomy_routing", profiler=profiler):
             resolved, needs_fallback, rejections = [], [], []
