@@ -1,0 +1,17 @@
+# Local workspace settings and credentials
+.codex/
+.agents/
+.aws/
+.secrets/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Local environments and generated caches
+__pycache__/
+*.py[cod]
+.venv*/
+.pytest_cache/
+.cache/
+*.log

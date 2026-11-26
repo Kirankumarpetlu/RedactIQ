@@ -1,0 +1,24 @@
+# Opt-in profile retaining original GLiNER window contexts. Subsampling can
+# omit evidence, and INT8 can change IndicNER scores; benchmark before use.
+models:
+  gliner_primary:
+    threshold: 0.50
+    window_size: 512
+    stride: 384
+    # Keep every fourth original window and the original final window.
+    # The resulting windows overlap and cover the complete transcript.
+    window_stride_multiplier: 4
+  indic_ner:
+    telugu_enrichment:
+      enabled: true
+    device: cpu
+    cpu_int8: true
+    min_confidence: 0.95
+
+runtime:
+  device: cuda:0
+  # Four threads leave CPU capacity for tokenization while IndicNER overlaps
+  # the GPU primary detector on this 4-core / 8-thread benchmark host.
+  cpu_threads: 4
+  parallel_cpu_gpu: true
+  fallback_to_cpu: false

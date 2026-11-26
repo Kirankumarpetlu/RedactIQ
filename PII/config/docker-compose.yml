@@ -1,0 +1,101 @@
+services:
+  gpu-worker-0:
+    profiles: ["gpu"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    environment:
+      - PII_SERVICE_ROLE=gpu-worker
+      - PII_EXECUTION_MODE=gpu
+      - PII_REQUIRE_GPU=true
+      - PII_STRICT_PRIVACY_MODE=true
+      - CUDA_VISIBLE_DEVICES=0
+      - PII_DEVICE=cuda:0
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports: ["8001:8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  gpu-worker-1:
+    profiles: ["gpu"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    environment:
+      - PII_SERVICE_ROLE=gpu-worker
+      - PII_EXECUTION_MODE=gpu
+      - PII_REQUIRE_GPU=true
+      - PII_STRICT_PRIVACY_MODE=true
+      - CUDA_VISIBLE_DEVICES=1
+      - PII_DEVICE=cuda:1
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports: ["8002:8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    environment:
+      - PII_SERVICE_ROLE=gateway
+      - PII_EXECUTION_MODE=cpu
+      - PII_REQUIRE_GPU=false
+      - PII_STRICT_PRIVACY_MODE=true
+      - PII_DEVICE=cpu
+      - PII_GPU_WORKER_0_URL=http://gpu-worker-0:8000
+      - PII_GPU_WORKER_1_URL=http://gpu-worker-1:8000
+      - PII_CPU_WORKER_URL=http://cpu-worker:8000
+      - PII_WORKER_TIMEOUT_SECONDS=120
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    ports: ["8080:8000"]
+    depends_on:
+      cpu-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  cpu-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    environment:
+      - PII_SERVICE_ROLE=cpu-worker
+      - PII_EXECUTION_MODE=cpu
+      - PII_REQUIRE_GPU=false
+      - PII_STRICT_PRIVACY_MODE=true
+      - PII_DEVICE=cpu
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    ports: ["8003:8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

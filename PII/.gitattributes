@@ -1,0 +1,12 @@
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cjs text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
+# Preserve the generated formatting of Matplotlib SVG paths.
+docs/assets/**/*.svg -whitespace

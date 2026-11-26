@@ -1,0 +1,22 @@
+# Opt-in profile validated on 500 development rows using a GTX 1650.
+# Retain the original maximum 2048-character window size.
+# A 256-character overlap covers name/address spans without re-aligning a
+# nearly full final window. The last window closes at the actual text end.
+models:
+  gliner_primary:
+    threshold: 0.50
+    window_size: 512
+    stride: 1792
+    window_stride_multiplier: 1
+  indic_ner:
+    telugu_enrichment:
+      enabled: true
+    device: cpu
+    cpu_int8: true
+    min_confidence: 0.95
+
+runtime:
+  device: cuda:0
+  cpu_threads: 4
+  parallel_cpu_gpu: true
+  fallback_to_cpu: false
